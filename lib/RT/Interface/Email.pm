@@ -857,12 +857,25 @@ sub SendEmail {
 
     if ( $mail_command eq 'sendmailpipe' ) {
         my $path = RT->Config->Get('SendmailPath');
-        my @args = shellwords(RT->Config->Get('SendmailArguments'));
-        push @args, "-t" unless grep {$_ eq "-t"} @args;
+        my @args = SendmailArguments(%args);
+        push @args, "-t";
 
-        # SetOutgoingMailFrom and bounces conflict, since they both want -f
-        if ( $args{'Bounce'} ) {
-            push @args, shellwords(RT->Config->Get('SendmailBounceArguments'));
+        # all the different methods of setting "-f" are mutually exclusive
+        if (grep {$_ eq "-f"} @args) {
+            # a SendmailArguments hook has already set the envelope sender
+            # that could include these config values:
+            #   SendmailArguments
+            #   SendmailBounceArguments
+            # assume that they know what they're doing
+        } elsif ( $TransactionObj and
+                my $prefix = RT->Config->Get('VERPPrefix') and
+                my $domain = RT->Config->Get('VERPDomain') ) {
+            # VERP support is available and requested
+            # generate a VERP address based on the sender's address
+            my $from = $TransactionObj->CreatorObj->EmailAddress;
+            $from =~ s/@/=/g;
+            $from =~ s/\s//g;
+            push @args, "-f", "$prefix$from\@$domain";
         } elsif ( my $MailFrom = RT->Config->Get('SetOutgoingMailFrom') ) {
             my $OutgoingMailAddress = $MailFrom =~ /\@/ ? $MailFrom : undef;
             my $Overrides = RT->Config->Get('OverrideOutgoingMailFrom') || {};
@@ -887,16 +900,6 @@ sub SendEmail {
                 if $OutgoingMailAddress;
         }
 
-        # VERP
-        if ( $TransactionObj and
-             my $prefix = RT->Config->Get('VERPPrefix') and
-             my $domain = RT->Config->Get('VERPDomain') )
-        {
-            my $from = $TransactionObj->CreatorObj->EmailAddress;
-            $from =~ s/@/=/g;
-            $from =~ s/\s//g;
-            push @args, "-f", "$prefix$from\@$domain";
-        }
 
         eval {
             # don't ignore CHLD signal to get proper exit code
@@ -958,8 +961,7 @@ sub SendEmail {
         my @mailer_args = ($mail_command);
         if ( $mail_command eq 'sendmail' ) {
             $ENV{'PERL_MAILERS'} = RT->Config->Get('SendmailPath');
-            push @mailer_args, grep {$_ ne "-t"}
-                split(/\s+/, RT->Config->Get('SendmailArguments'));
+            push @mailer_args, SendmailArguments(%args);
         } elsif ( $mail_command eq 'testfile' ) {
             unless ($Mail::Mailer::testfile::config{outfile}) {
                 $Mail::Mailer::testfile::config{outfile} = File::Temp->new;
@@ -979,6 +981,42 @@ sub SendEmail {
     }
     return 1;
 }
+
+
+
+=head3 SendmailArguments Entity => undef, [ Bounce => 0, Ticket => undef, Transaction => undef ]
+
+Hook function which provides the C<sendmail> arguments which should be
+used when sending the message embodied by the hook's arguments. The
+default implementation returns the contents of the C<SendmailArguments>
+config value split by C<shellwords>.
+
+Hook implementers must take care to respect the C<Bounce> argument:
+when it's set only arguments that make sense for a bounce message
+should be added. In particular, implementations MUST NOT add the
+C<-f> argument when C<Bounce> is set. The default implementation will
+add the contents of the C<SendmailBounceArguments> config value split
+by C<shellwords> when C<Bounce> is set.
+
+=cut
+
+sub SendmailArguments {
+    my (%args) = (
+        Bounce => 0,
+        @_
+    );
+
+    my @args = grep {$_ ne "-t"}
+        shellwords(RT->Config->Get('SendmailArguments'));
+
+    if ($args{'Bounce'}) {
+        push @args, shellwords(RT->Config->Get('SendmailBounceArguments'));
+    }
+
+    return @args;
+}
+
+
 
 =head3 PrepareEmailUsingTemplate Template => '', Arguments => {}
 
